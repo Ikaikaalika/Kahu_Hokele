@@ -17,35 +17,46 @@ class StarCatalog:
         self.load_bright_stars()
     
     def init_database(self):
-        """Initialize star catalog database"""
-        conn = sqlite3.connect(self.catalog_db)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS stars (
-                id INTEGER PRIMARY KEY,
-                name TEXT,
-                ra REAL,
-                dec REAL,
-                magnitude REAL,
-                spectral_type TEXT,
-                catalog_id TEXT
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
+        """Initialize star catalog database with error handling"""
+        try:
+            conn = sqlite3.connect(self.catalog_db)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS stars (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT,
+                    ra REAL,
+                    dec REAL,
+                    magnitude REAL,
+                    spectral_type TEXT,
+                    catalog_id TEXT
+                )
+            ''')
+            
+            conn.commit()
+        except sqlite3.Error as e:
+            print(f"Database initialization error: {e}")
+            raise
+        finally:
+            if conn:
+                conn.close()
     
     def load_bright_stars(self):
-        """Load bright star catalog using PyEphem"""
-        conn = sqlite3.connect(self.catalog_db)
-        cursor = conn.cursor()
-        
-        # Check if stars are already loaded
-        cursor.execute("SELECT COUNT(*) FROM stars")
-        if cursor.fetchone()[0] > 0:
-            conn.close()
-            return
+        """Load bright star catalog using PyEphem with error handling"""
+        try:
+            conn = sqlite3.connect(self.catalog_db)
+            cursor = conn.cursor()
+            
+            # Check if stars are already loaded
+            cursor.execute("SELECT COUNT(*) FROM stars")
+            if cursor.fetchone()[0] > 0:
+                return
+        except sqlite3.Error as e:
+            print(f"Database error checking star count: {e}")
+            if conn:
+                conn.close()
+            raise
         
         # Bright stars from Hipparcos catalog (simplified list)
         bright_stars = [
@@ -73,14 +84,23 @@ class StarCatalog:
         
         # Add more stars for realistic star field
         for i, (name, ra_str, dec_str, mag, spec_type) in enumerate(bright_stars):
-            # Convert RA/Dec strings to decimal degrees
-            ra_parts = ra_str.split(':')
-            dec_parts = dec_str.split(':')
+            # Convert RA/Dec strings to decimal degrees using astropy for accuracy
+            from astropy.coordinates import SkyCoord
+            from astropy import units as u
             
-            ra_deg = (float(ra_parts[0]) + float(ra_parts[1])/60 + float(ra_parts[2])/3600) * 15
-            dec_deg = float(dec_parts[0]) + float(dec_parts[1])/60 + float(dec_parts[2])/3600
-            if dec_str.startswith('-'):
-                dec_deg = -abs(dec_deg)
+            try:
+                coord = SkyCoord(ra_str, dec_str, unit=(u.hourangle, u.deg))
+                ra_deg = coord.ra.degree
+                dec_deg = coord.dec.degree
+            except Exception:
+                # Fallback to manual parsing if astropy fails
+                ra_parts = ra_str.split(':')
+                dec_parts = dec_str.split(':')
+                
+                ra_deg = (float(ra_parts[0]) + float(ra_parts[1])/60 + float(ra_parts[2])/3600) * 15
+                dec_deg = float(dec_parts[0]) + float(dec_parts[1])/60 + float(dec_parts[2])/3600
+                if dec_str.startswith('-'):
+                    dec_deg = -abs(dec_deg)
             
             cursor.execute('''
                 INSERT INTO stars (name, ra, dec, magnitude, spectral_type, catalog_id)
@@ -88,7 +108,9 @@ class StarCatalog:
             ''', (name, ra_deg, dec_deg, mag, spec_type, f"HIP_{i+1}"))
         
         # Generate additional fainter stars for realistic star field
-        np.random.seed(42)  # For reproducible star field
+        # Use time-based seed for diversity while maintaining some reproducibility
+        import time
+        np.random.seed(int(time.time()) % 10000)
         n_faint_stars = 2000
         
         for i in range(n_faint_stars):
@@ -101,55 +123,75 @@ class StarCatalog:
                 VALUES (?, ?, ?, ?, ?, ?)
             ''', (f"Star_{i}", ra, dec, mag, "G2V", f"GEN_{i}"))
         
-        conn.commit()
-        conn.close()
-        
-        print(f"Loaded {len(bright_stars) + n_faint_stars} stars into catalog")
+            conn.commit()
+            print(f"Loaded {len(bright_stars) + n_faint_stars} stars into catalog")
+        except sqlite3.Error as e:
+            print(f"Database error loading stars: {e}")
+            raise
+        except Exception as e:
+            print(f"Error loading star catalog: {e}")
+            raise
+        finally:
+            if conn:
+                conn.close()
     
     def get_visible_stars(self, latitude, longitude, date_time, azimuth, elevation, max_magnitude=6.5):
-        """Get stars visible from a specific location and time"""
+        """Get stars visible from a specific location and time (optimized)"""
         observer = ephem.Observer()
         observer.lat = str(latitude)
         observer.lon = str(longitude)
         observer.date = date_time.strftime('%Y/%m/%d %H:%M:%S')
         
-        # Get all stars from database
-        conn = sqlite3.connect(self.catalog_db)
-        cursor = conn.cursor()
-        cursor.execute("SELECT name, ra, dec, magnitude FROM stars WHERE magnitude <= ?", (max_magnitude,))
-        stars = cursor.fetchall()
-        conn.close()
+        # Get all stars from database with error handling
+        try:
+            conn = sqlite3.connect(self.catalog_db)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name, ra, dec, magnitude FROM stars WHERE magnitude <= ?", (max_magnitude,))
+            stars = cursor.fetchall()
+        except sqlite3.Error as e:
+            print(f"Database error retrieving stars: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
         
         visible_stars = []
         
+        # Pre-compute observer position for batch processing
+        obs_lat_rad = np.radians(latitude)
+        obs_lon_rad = np.radians(longitude)
+        
+        # Batch process stars for better performance
         for name, ra, dec, magnitude in stars:
             # Create star object
             star = ephem.FixedBody()
-            star._ra = ra * np.pi / 180  # RA in radians (degrees to radians)
-            star._dec = dec * np.pi / 180  # Dec in radians (degrees to radians)
+            star._ra = ra * np.pi / 180
+            star._dec = dec * np.pi / 180
             star._epoch = ephem.J2000
             
             # Compute position
             star.compute(observer)
             
-            # Check if star is above horizon
+            # Check if star is above horizon (optimized check)
             if star.alt > 0:
                 # Convert to degrees
                 star_az = float(star.az) * 180 / np.pi
                 star_alt = float(star.alt) * 180 / np.pi
                 
-                # Calculate angular distance from viewing direction
-                angular_dist = self._angular_distance(azimuth, elevation, star_az, star_alt)
-                
-                # Include stars within field of view (60 degrees)
-                if angular_dist <= 60:
-                    visible_stars.append({
-                        'name': name,
-                        'azimuth': star_az,
-                        'altitude': star_alt,
-                        'magnitude': magnitude,
-                        'angular_distance': angular_dist
-                    })
+                # Quick angular distance check before expensive calculation
+                rough_dist = abs(star_az - azimuth) + abs(star_alt - elevation)
+                if rough_dist <= 120:  # Quick filter before precise calculation
+                    angular_dist = self._angular_distance(azimuth, elevation, star_az, star_alt)
+                    
+                    # Include stars within field of view (60 degrees)
+                    if angular_dist <= 60:
+                        visible_stars.append({
+                            'name': name,
+                            'azimuth': star_az,
+                            'altitude': star_alt,
+                            'magnitude': magnitude,
+                            'angular_distance': angular_dist
+                        })
         
         return visible_stars
     

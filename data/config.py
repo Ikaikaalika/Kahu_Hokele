@@ -46,8 +46,23 @@ DATABASE_FILE = PROJECT_DATA_ROOT / "generation_progress.db"
 
 # Performance parameters
 BATCH_SIZE = 100  # Images to process in memory at once
-MAX_WORKERS = 8   # For M1 Mac optimization
-MEMORY_LIMIT_GB = 8  # Memory usage limit
+
+def get_optimal_workers():
+    """Dynamically determine optimal worker count based on CPU cores"""
+    import os
+    cpu_count = os.cpu_count() or 4
+    # Use 75% of available cores, minimum 1, maximum 12
+    return max(1, min(12, int(cpu_count * 0.75)))
+
+def get_memory_limit():
+    """Dynamically determine memory limit based on available RAM"""
+    import psutil
+    total_memory_gb = psutil.virtual_memory().total / (1024**3)
+    # Use 50% of available memory, minimum 4GB, maximum 16GB
+    return max(4, min(16, int(total_memory_gb * 0.5)))
+
+MAX_WORKERS = get_optimal_workers()
+MEMORY_LIMIT_GB = get_memory_limit()
 
 # Validation parameters
 REQUIRED_FREE_SPACE_GB = 60  # Minimum free space required on external drive
@@ -81,17 +96,22 @@ def get_week_dates():
     return dates
 
 def validate_external_drive():
-    """Validate external drive availability and space"""
+    """Validate external drive availability and space with error handling"""
     import shutil
     
-    if not EXTERNAL_DRIVE_PATH.exists():
-        raise FileNotFoundError(f"External drive not found at {EXTERNAL_DRIVE_PATH}")
-    
-    free_space_gb = shutil.disk_usage(EXTERNAL_DRIVE_PATH).free / (1024**3)
-    if free_space_gb < REQUIRED_FREE_SPACE_GB:
-        raise RuntimeError(f"Insufficient space on external drive. Required: {REQUIRED_FREE_SPACE_GB}GB, Available: {free_space_gb:.1f}GB")
-    
-    return free_space_gb
+    try:
+        if not EXTERNAL_DRIVE_PATH.exists():
+            raise FileNotFoundError(f"External drive not found at {EXTERNAL_DRIVE_PATH}")
+        
+        free_space_gb = shutil.disk_usage(EXTERNAL_DRIVE_PATH).free / (1024**3)
+        if free_space_gb < REQUIRED_FREE_SPACE_GB:
+            raise RuntimeError(f"Insufficient space on external drive. Required: {REQUIRED_FREE_SPACE_GB}GB, Available: {free_space_gb:.1f}GB")
+        
+        return free_space_gb
+    except OSError as e:
+        raise RuntimeError(f"Error accessing external drive: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Unexpected error validating external drive: {e}")
 
 def get_output_path(latitude, longitude, week, direction):
     """Generate output path for a specific sample"""
@@ -108,14 +128,19 @@ def get_output_path(latitude, longitude, week, direction):
     return path
 
 def create_directory_structure():
-    """Create the complete directory structure"""
-    DATASET_ROOT.mkdir(parents=True, exist_ok=True)
-    
-    # Create regional directories
-    coordinates = get_coordinates()
-    for lat, lon in coordinates:
-        for week in range(SAMPLES_PER_YEAR):
-            for direction in VIEWING_DIRECTIONS.keys():
-                path = get_output_path(lat, lon, week, direction)
-                path.mkdir(parents=True, exist_ok=True)
+    """Create the complete directory structure with error handling"""
+    try:
+        DATASET_ROOT.mkdir(parents=True, exist_ok=True)
+        
+        # Create regional directories
+        coordinates = get_coordinates()
+        for lat, lon in coordinates:
+            for week in range(SAMPLES_PER_YEAR):
+                for direction in VIEWING_DIRECTIONS.keys():
+                    path = get_output_path(lat, lon, week, direction)
+                    path.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise RuntimeError(f"Error creating directory structure: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Unexpected error creating directories: {e}")
 

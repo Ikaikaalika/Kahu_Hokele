@@ -54,16 +54,26 @@ class AstronomicalDataLoader:
         
         print(f"Loaded {len(self.samples)} samples")
     
-    def _preprocess_image(self, image_path: str) -> mx.array:
-        """Load and preprocess an image"""
+    def _preprocess_image(self, image_path: str, augmentation=None) -> mx.array:
+        """Load and preprocess an image with optional augmentation"""
         image = Image.open(image_path).convert('RGB')
         image = image.resize((self.image_size, self.image_size))
+        
+        # Apply augmentation if provided
+        if augmentation is not None:
+            image = augmentation.augment_image(image)
         
         # Convert to numpy array and normalize to [0, 1]
         image_array = np.array(image).astype(np.float32) / 255.0
         
-        # Convert to MLX array and add channel dimension if needed
-        return mx.array(image_array)
+        # Convert to MLX array
+        mx_array = mx.array(image_array)
+        
+        # Apply array-level augmentation if provided
+        if augmentation is not None:
+            mx_array = augmentation.augment_array(mx_array)
+        
+        return mx_array
     
     def _extract_features(self, metadata: Dict) -> Tuple[mx.array, mx.array]:
         """Extract features from metadata"""
@@ -103,8 +113,8 @@ class AstronomicalDataLoader:
         
         return features, location
     
-    def get_batch(self, indices: List[int]) -> Tuple[mx.array, mx.array, mx.array]:
-        """Get a batch of data"""
+    def get_batch(self, indices: List[int], augmentation=None) -> Tuple[mx.array, mx.array, mx.array]:
+        """Get a batch of data with optional augmentation"""
         images = []
         features = []
         locations = []
@@ -112,12 +122,17 @@ class AstronomicalDataLoader:
         for idx in indices:
             sample = self.samples[idx]
             
-            # Load image
-            image = self._preprocess_image(sample['image_path'])
+            # Load image with augmentation
+            image = self._preprocess_image(sample['image_path'], augmentation)
             images.append(image)
             
             # Extract features and target
             feat, loc = self._extract_features(sample['metadata'])
+            
+            # Apply feature augmentation if provided
+            if augmentation is not None:
+                feat = augmentation.augment_features(feat)
+            
             features.append(feat)
             locations.append(loc)
         

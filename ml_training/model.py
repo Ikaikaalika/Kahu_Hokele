@@ -21,20 +21,75 @@ class ConvBlock(nn.Module):
     def __call__(self, x):
         return self.relu(self.bn(self.conv(x)))
 
-class ResidualBlock(nn.Module):
-    """Residual block for deeper networks"""
+class SpatialAttention(nn.Module):
+    """Spatial attention mechanism for focusing on important image regions"""
+    
+    def __init__(self, channels: int):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels // 8, 1)
+        self.conv2 = nn.Conv2d(channels // 8, 1, 1)
+        self.sigmoid = nn.Sigmoid()
+    
+    def __call__(self, x):
+        # x shape: (batch, height, width, channels)
+        attention = self.conv1(x)
+        attention = nn.relu(attention)
+        attention = self.conv2(attention)
+        attention = self.sigmoid(attention)
+        return x * attention
+
+class ChannelAttention(nn.Module):
+    """Channel attention mechanism for feature importance"""
+    
+    def __init__(self, channels: int, reduction: int = 16):
+        super().__init__()
+        self.avg_pool = lambda x: mx.mean(x, axis=(1, 2), keepdims=True)
+        self.max_pool = lambda x: mx.max(x, axis=(1, 2), keepdims=True)
+        
+        self.fc1 = nn.Linear(channels, channels // reduction)
+        self.fc2 = nn.Linear(channels // reduction, channels)
+        self.sigmoid = nn.Sigmoid()
+    
+    def __call__(self, x):
+        # x shape: (batch, height, width, channels)
+        avg_out = self.avg_pool(x)
+        max_out = self.max_pool(x)
+        
+        # Reshape for linear layers
+        avg_out = mx.reshape(avg_out, (avg_out.shape[0], -1))
+        max_out = mx.reshape(max_out, (max_out.shape[0], -1))
+        
+        avg_out = self.fc2(nn.relu(self.fc1(avg_out)))
+        max_out = self.fc2(nn.relu(self.fc1(max_out)))
+        
+        out = avg_out + max_out
+        out = self.sigmoid(out)
+        
+        # Reshape back and apply attention
+        out = mx.reshape(out, (out.shape[0], 1, 1, out.shape[1]))
+        return x * out
+
+class AttentionResidualBlock(nn.Module):
+    """Residual block with spatial and channel attention"""
     
     def __init__(self, channels: int):
         super().__init__()
         self.conv1 = ConvBlock(channels, channels)
         self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
         self.bn2 = nn.BatchNorm(channels)
+        self.channel_attention = ChannelAttention(channels)
+        self.spatial_attention = SpatialAttention(channels)
         self.relu = nn.ReLU()
     
     def __call__(self, x):
         residual = x
         out = self.conv1(x)
         out = self.bn2(self.conv2(out))
+        
+        # Apply attention mechanisms
+        out = self.channel_attention(out)
+        out = self.spatial_attention(out)
+        
         out = out + residual
         return self.relu(out)
 
@@ -47,15 +102,15 @@ class ImageEncoder(nn.Module):
         # Initial conv layers
         self.conv1 = ConvBlock(input_channels, 64, 7, 2)  # 224x224 -> 112x112
         
-        # Residual blocks
+        # Attention-enhanced residual blocks
         self.conv2 = ConvBlock(64, 128, 3, 2)  # 112x112 -> 56x56
-        self.res1 = ResidualBlock(128)
+        self.res1 = AttentionResidualBlock(128)
         
         self.conv3 = ConvBlock(128, 256, 3, 2)  # 56x56 -> 28x28
-        self.res2 = ResidualBlock(256)
+        self.res2 = AttentionResidualBlock(256)
         
         self.conv4 = ConvBlock(256, 512, 3, 2)  # 28x28 -> 14x14
-        self.res3 = ResidualBlock(512)
+        self.res3 = AttentionResidualBlock(512)
         
         # Output feature dimension
         self.feature_dim = 512
